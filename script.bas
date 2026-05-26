@@ -424,38 +424,6 @@ End Sub
 '  Lógica: colaborador presente en mes N pero ausente en mes N+1 = desvinculado
 '  Segmenta por Chats y Llamadas usando CONFIG (igual que ActualizarResumen)
 '===============================================================================
-'===============================================================================
-'  MACRO: ACTUALIZAR DESVINCULACIONES POR MES
-'  Filtros de exclusión aplicados antes de procesar:
-'    - Tipo de Orgánico = "Staff"
-'    - Canal 2 contiene: Yape, IO, TRAINEE M1, TRAINEE M2, Contactos Web M1/M2
-'    - Tipo contiene: Supervisor, Atento
-'    - Función actual = "EMPRESA PROVEEDORA" o contiene: ASESOR PRINCIPAL, ASISTENTE
-'===============================================================================
-'===============================================================================
-'  HELPER: Determinar segmento (Chats / Llamadas / "")
-'===============================================================================
-Private Function GetServicio(gciaV As String, _
-                              chatsG() As String, nC As Long, _
-                              llamadasG() As String, nL As Long) As String
-    Dim c As Long
-    If nC > 0 Then
-        For c = 0 To nC - 1
-            If InStr(gciaV, chatsG(c)) > 0 Or InStr(chatsG(c), gciaV) > 0 Then
-                GetServicio = "Chats": Exit Function
-            End If
-        Next c
-    End If
-    If nL > 0 Then
-        For c = 0 To nL - 1
-            If InStr(gciaV, llamadasG(c)) > 0 Or InStr(llamadasG(c), gciaV) > 0 Then
-                GetServicio = "Llamadas": Exit Function
-            End If
-        Next c
-    End If
-    GetServicio = ""
-End Function
-
 Public Sub ActualizarDesvinculaciones()
 
     Application.ScreenUpdating = False
@@ -464,7 +432,6 @@ Public Sub ActualizarDesvinculaciones()
 
     Dim wsData  As Worksheet
     Dim wsDesv  As Worksheet
-    Dim wsDetalle As Worksheet
     Dim wsCfg   As Worksheet
 
     On Error GoTo ErrHandlerDesv
@@ -472,7 +439,7 @@ Public Sub ActualizarDesvinculaciones()
     Set wsData = ThisWorkbook.Sheets(SH_DATA)
     Set wsCfg  = ThisWorkbook.Sheets(SH_CONFIG)
 
-    '── Crear / limpiar hoja RESUMEN desvinculaciones ────────────────────────
+    ' Crear hoja si no existe
     Dim shName As String
     shName = "Desvinculaciones por mes"
     On Error Resume Next
@@ -483,23 +450,13 @@ Public Sub ActualizarDesvinculaciones()
         wsDesv.Name = shName
     End If
 
-    '── Crear / limpiar hoja DETALLE desvinculados ───────────────────────────
-    Dim shDetalle As String
-    shDetalle = "Detalle Desvinculados"
-    On Error Resume Next
-    Set wsDetalle = ThisWorkbook.Sheets(shDetalle)
-    On Error GoTo ErrHandlerDesv
-    If wsDetalle Is Nothing Then
-        Set wsDetalle = ThisWorkbook.Sheets.Add(After:=wsDesv)
-        wsDetalle.Name = shDetalle
-    End If
-
-    '── 1. Leer gerencias desde CONFIG ───────────────────────────────────────
+    '── 1. Leer gerencias desde CONFIG (misma lógica que ActualizarResumen) ──
     Dim chatsGD()    As String
     Dim llamadasGD() As String
     Dim nCD As Long, nLD As Long
     nCD = 0: nLD = 0
-    ReDim chatsGD(0): ReDim llamadasGD(0)
+    ReDim chatsGD(0)
+    ReDim llamadasGD(0)
 
     Dim r As Long
     For r = 4 To 100
@@ -510,103 +467,61 @@ Public Sub ActualizarDesvinculaciones()
         If gciaD = "" Then GoTo NextCfgD
         If tipoD = "CHATS" Then
             If nCD > 0 Then ReDim Preserve chatsGD(nCD)
-            chatsGD(nCD) = gciaD: nCD = nCD + 1
+            chatsGD(nCD) = gciaD
+            nCD = nCD + 1
         ElseIf tipoD = "LLAMADAS" Then
             If nLD > 0 Then ReDim Preserve llamadasGD(nLD)
-            llamadasGD(nLD) = gciaD: nLD = nLD + 1
+            llamadasGD(nLD) = gciaD
+            nLD = nLD + 1
         End If
 NextCfgD:
     Next r
 
-    '── 2. Orden de meses ────────────────────────────────────────────────────
+    '── 2. Leer orden de meses desde CONFIG ──────────────────────────────────
     Dim mesOrdenD(1 To 12) As String
     Dim i As Long
     For i = 1 To 12
         mesOrdenD(i) = Trim(CStr(wsCfg.Cells(8 + i, 2).Value))
     Next i
 
-    '── 3. Leer DATA con filtros de exclusión ────────────────────────────────
-    '
-    '  Columnas usadas para filtrar:
-    '    Col  7 = Colaborador (nombre)
-    '    Col 11 = Función actual
-    '    Col 19 = Canal 2
-    '    Col 20 = Tipo
-    '    Col 21 = Tipo de Orgánico
-    '
-    '  dictMat  key="mes|mat"  val="gcia|nombre_colaborador"
-    '
-    Dim dictMat    As Object
-    Dim mesesPresD As Object
+    '── 3. Leer DATA: (mes|mat) → gcia ──────────────────────────────────────
+    '    Un colaborador se considera de un segmento según su Gcia
+    Dim dictMat      As Object   ' key="mes|mat"  value="gcia"
+    Dim mesesPresD   As Object   ' meses con datos
     Set dictMat    = CreateObject("Scripting.Dictionary")
     Set mesesPresD = CreateObject("Scripting.Dictionary")
 
     Dim lastRowD As Long
     lastRowD = wsData.Cells(wsData.Rows.Count, COL_MATRICULA).End(xlUp).Row
-    Application.StatusBar = "Leyendo y filtrando " & lastRowD & " registros..."
 
-    Dim excluidos As Long
-    excluidos = 0
+    Application.StatusBar = "Leyendo " & lastRowD & " registros para desvinculaciones..."
 
     For r = 2 To lastRowD
         Dim anoD As String
         anoD = Trim(CStr(wsData.Cells(r, COL_ANO).Value))
         If anoD <> "2026" Then GoTo NextRowD
 
-        ' Leer campos de exclusión
-        Dim colTipoOrg  As String   ' Col 21
-        Dim colCanal2   As String   ' Col 19
-        Dim colTipo     As String   ' Col 20
-        Dim colFuncion  As String   ' Col 11
-        colTipoOrg = UCase(Trim(CStr(wsData.Cells(r, 21).Value)))
-        colCanal2  = UCase(Trim(CStr(wsData.Cells(r, 19).Value)))
-        colTipo    = UCase(Trim(CStr(wsData.Cells(r, 20).Value)))
-        colFuncion = UCase(Trim(CStr(wsData.Cells(r, 11).Value)))
-
-        '── Aplicar filtros de exclusión ─────────────────────────────────────
-        ' 1. Tipo de Orgánico = "Staff"
-        If colTipoOrg = "STAFF" Then excluidos = excluidos + 1: GoTo NextRowD
-
-        ' 2. Canal 2 contiene alguna de las palabras clave
-        If InStr(colCanal2, "YAPE") > 0           Then excluidos = excluidos + 1: GoTo NextRowD
-        If InStr(colCanal2, "IO") > 0             Then excluidos = excluidos + 1: GoTo NextRowD
-        If InStr(colCanal2, "TRAINEE M1") > 0     Then excluidos = excluidos + 1: GoTo NextRowD
-        If InStr(colCanal2, "TRAINEE M2") > 0     Then excluidos = excluidos + 1: GoTo NextRowD
-        If InStr(colCanal2, "CONTACTOS WEB M1") > 0 Then excluidos = excluidos + 1: GoTo NextRowD
-        If InStr(colCanal2, "CONTACTOS WEB M2") > 0 Then excluidos = excluidos + 1: GoTo NextRowD
-
-        ' 3. Tipo contiene Supervisor o Atento
-        If InStr(colTipo, "SUPERVISOR") > 0 Then excluidos = excluidos + 1: GoTo NextRowD
-        If InStr(colTipo, "ATENTO") > 0     Then excluidos = excluidos + 1: GoTo NextRowD
-
-        ' 4. Función actual = "EMPRESA PROVEEDORA" o contiene ASESOR PRINCIPAL / ASISTENTE
-        If colFuncion = "EMPRESA PROVEEDORA"         Then excluidos = excluidos + 1: GoTo NextRowD
-        If InStr(colFuncion, "ASESOR PRINCIPAL") > 0 Then excluidos = excluidos + 1: GoTo NextRowD
-        If InStr(colFuncion, "ASISTENTE") > 0        Then excluidos = excluidos + 1: GoTo NextRowD
-
-        '── Registro válido: guardar en diccionario ───────────────────────────
-        Dim mesD As String, matD As String
-        Dim gciaCell As String, nombreColab As String
-        mesD        = Trim(CStr(wsData.Cells(r, COL_MES).Value))
-        matD        = Trim(CStr(wsData.Cells(r, COL_MATRICULA).Value))
-        gciaCell    = Trim(CStr(wsData.Cells(r, COL_GCIA).Value))
-        nombreColab = Trim(CStr(wsData.Cells(r, 7).Value))   ' Col 7 = Colaborador
+        Dim mesD As String, matD As String, gciaCell As String
+        mesD     = Trim(CStr(wsData.Cells(r, COL_MES).Value))
+        matD     = Trim(CStr(wsData.Cells(r, COL_MATRICULA).Value))
+        gciaCell = Trim(CStr(wsData.Cells(r, COL_GCIA).Value))
 
         If mesD = "" Or matD = "" Then GoTo NextRowD
 
         Dim keyD As String
         keyD = mesD & "|" & matD
         If Not dictMat.Exists(keyD) Then
-            ' val = "GCIA||NombreColaborador"  (doble pipe para evitar conflicto con nombres)
-            dictMat.Add keyD, UCase(gciaCell) & "||" & nombreColab
+            dictMat.Add keyD, UCase(gciaCell)
         End If
-        If Not mesesPresD.Exists(mesD) Then mesesPresD.Add mesD, True
+        If Not mesesPresD.Exists(mesD) Then
+            mesesPresD.Add mesD, True
+        End If
 NextRowD:
     Next r
 
-    '── 4. Lista ordenada de meses ───────────────────────────────────────────
+    '── 4. Lista ordenada de meses con datos ─────────────────────────────────
     Dim mesesOrdD() As String
-    Dim nMesesD As Long
+    Dim nMesesD     As Long
     nMesesD = 0
     For i = 1 To 12
         If mesOrdenD(i) <> "" Then
@@ -624,38 +539,34 @@ NextRowD:
         GoTo CleanupDesv
     End If
 
-    '── 5. Limpiar hojas ─────────────────────────────────────────────────────
+    '── 5. Limpiar hoja desde fila 5 hacia abajo ─────────────────────────────
     Dim lastDR As Long
     lastDR = wsDesv.Cells(wsDesv.Rows.Count, 1).End(xlUp).Row
-    If lastDR >= 5 Then wsDesv.Rows("5:" & lastDR + 2).Delete
+    If lastDR >= 5 Then
+        wsDesv.Rows("5:" & lastDR + 2).Delete
+    End If
 
-    wsDetalle.Cells.Clear
-
-    '── 6. Preparar encabezado de hoja DETALLE ───────────────────────────────
-    FormatDetalleHeader wsDetalle
-
-    Dim detRow As Long
-    detRow = 5   ' filas 1-4 = encabezado de la hoja detalle
-
-    '── 7. Calcular desvinculaciones y escribir ambas hojas ──────────────────
+    '── 6. Calcular desvinculaciones por período ──────────────────────────────
+    '    Desvinculado = presente en mes A, ausente en mes A+1, del segmento X
     Dim writeRowD As Long
     writeRowD = 5
+
     Dim totDesvC As Long, totDesvL As Long
     totDesvC = 0: totDesvL = 0
 
     Dim tD As Long
     For tD = 0 To nMesesD - 2
+
         Dim mesAD As String, mesBD As String
-        mesAD = mesesOrdD(tD): mesBD = mesesOrdD(tD + 1)
-        Application.StatusBar = "Desvinculaciones: " & mesAD & " → " & mesBD
+        mesAD = mesesOrdD(tD)
+        mesBD = mesesOrdD(tD + 1)
+
+        Application.StatusBar = "Calculando desvinculaciones: " & mesAD & " → " & mesBD
 
         Dim desvC As Long, desvL As Long
         desvC = 0: desvL = 0
 
-        ' Subencabezado en hoja DETALLE para este período
-        WriteDetalleSubHeader wsDetalle, detRow, mesAD & " → " & mesBD
-        detRow = detRow + 1
-
+        ' Recorrer todos los colaboradores del mes A
         Dim kvD As Variant
         For Each kvD In dictMat.Keys
             Dim kpD() As String
@@ -666,69 +577,66 @@ NextRowD:
             Dim matVD As String
             matVD = kpD(1)
 
-            ' Sigue activo en mes B → NO es desvinculado
+            ' ¿Sigue activo en mes B?
             Dim keyBD As String
             keyBD = mesBD & "|" & matVD
-            If dictMat.Exists(keyBD) Then GoTo NextKvD
+            If dictMat.Exists(keyBD) Then GoTo NextKvD   ' sigue activo → NO es desvinculado
 
-            ' Obtener gcia y nombre del colaborador
-            Dim rawVal As String
-            rawVal = CStr(dictMat(kvD))
-            Dim valParts() As String
-            valParts = Split(rawVal, "||")
-            Dim gciaVD As String, nombreVD As String
-            gciaVD   = valParts(0)
-            nombreVD = IIf(UBound(valParts) >= 1, valParts(1), "")
+            ' Determinar segmento por su Gcia en mes A
+            Dim gciaVD As String
+            gciaVD = CStr(dictMat(kvD))
 
-            ' Determinar segmento
             Dim servicioD As String
-            servicioD = GetServicio(gciaVD, chatsGD, nCD, llamadasGD, nLD)
+            servicioD = ""
+            Dim cD As Long
+            If nCD > 0 Then
+                For cD = 0 To nCD - 1
+                    If InStr(gciaVD, chatsGD(cD)) > 0 Or InStr(chatsGD(cD), gciaVD) > 0 Then
+                        servicioD = "Chats": Exit For
+                    End If
+                Next cD
+            End If
+            If servicioD = "" And nLD > 0 Then
+                For cD = 0 To nLD - 1
+                    If InStr(gciaVD, llamadasGD(cD)) > 0 Or InStr(llamadasGD(cD), gciaVD) > 0 Then
+                        servicioD = "Llamadas": Exit For
+                    End If
+                Next cD
+            End If
             If servicioD = "" Then GoTo NextKvD
 
-            If servicioD = "Chats" Then desvC = desvC + 1 Else desvL = desvL + 1
-
-            ' Escribir en hoja DETALLE
-            WriteDetalleRow wsDetalle, detRow, matVD, nombreVD, servicioD, mesAD, mesBD
-            detRow = detRow + 1
+            If servicioD = "Chats" Then
+                desvC = desvC + 1
+            Else
+                desvL = desvL + 1
+            End If
 NextKvD:
         Next kvD
-
-        ' Si no hubo desvinculados en este período, fila informativa
-        If desvC = 0 And desvL = 0 Then
-            WriteDetalleSinDatos wsDetalle, detRow
-            detRow = detRow + 1
-        End If
-
-        detRow = detRow + 1   ' línea en blanco entre períodos
 
         totDesvC = totDesvC + desvC
         totDesvL = totDesvL + desvL
 
+        ' Escribir fila de datos
         WriteDesvRow wsDesv, writeRowD, mesAD & " → " & mesBD, mesAD, desvC, desvL
         writeRowD = writeRowD + 1
+
     Next tD
 
+    '── 7. Fila de TOTAL ─────────────────────────────────────────────────────
     WriteDesvRowTotal wsDesv, writeRowD, totDesvC, totDesvL
     writeRowD = writeRowD + 1
 
-    '── 8. Timestamps ────────────────────────────────────────────────────────
+    '── 8. Timestamp ─────────────────────────────────────────────────────────
     Dim tsDR As Long
     tsDR = writeRowD + 1
     Merge_Cells_Safe wsDesv, tsDR, 1, tsDR, 7
     With wsDesv.Cells(tsDR, 1)
         .Value = "Ultima actualizacion: " & Format(Now(), "dd/mm/yyyy hh:mm:ss") & _
-                 "  |  Meses: " & nMesesD & _
-                 "  |  Registros excluidos por filtro: " & excluidos
-        .Font.Italic = True: .Font.Size = 8
-        .Font.Color = RGB(150, 150, 150): .Font.Name = "Arial"
-    End With
-
-    Merge_Cells_Safe wsDetalle, detRow + 1, 1, detRow + 1, 5
-    With wsDetalle.Cells(detRow + 1, 1)
-        .Value = "Ultima actualizacion: " & Format(Now(), "dd/mm/yyyy hh:mm:ss") & _
-                 "  |  Registros excluidos por filtro: " & excluidos
-        .Font.Italic = True: .Font.Size = 8
-        .Font.Color = RGB(150, 150, 150): .Font.Name = "Arial"
+                 "  |  Meses procesados: " & nMesesD
+        .Font.Italic = True
+        .Font.Size = 8
+        .Font.Color = RGB(150, 150, 150)
+        .Font.Name = "Arial"
     End With
 
     '── 9. Ajustar columnas ───────────────────────────────────────────────────
@@ -737,24 +645,18 @@ NextKvD:
     If wsDesv.Columns("B").ColumnWidth < 14 Then wsDesv.Columns("B").ColumnWidth = 14
     If wsDesv.Columns("C").ColumnWidth < 22 Then wsDesv.Columns("C").ColumnWidth = 22
     If wsDesv.Columns("D").ColumnWidth < 24 Then wsDesv.Columns("D").ColumnWidth = 24
-
-    wsDetalle.Columns("A:F").AutoFit
-    If wsDetalle.Columns("A").ColumnWidth < 16 Then wsDetalle.Columns("A").ColumnWidth = 16
-    If wsDetalle.Columns("B").ColumnWidth < 38 Then wsDetalle.Columns("B").ColumnWidth = 38
-    If wsDetalle.Columns("C").ColumnWidth < 14 Then wsDetalle.Columns("C").ColumnWidth = 14
-    If wsDetalle.Columns("D").ColumnWidth < 14 Then wsDetalle.Columns("D").ColumnWidth = 14
-    If wsDetalle.Columns("E").ColumnWidth < 14 Then wsDetalle.Columns("E").ColumnWidth = 14
-    If wsDetalle.Columns("F").ColumnWidth < 20 Then wsDetalle.Columns("F").ColumnWidth = 20
+    If wsDesv.Columns("E").ColumnWidth < 12 Then wsDesv.Columns("E").ColumnWidth = 12
+    If wsDesv.Columns("F").ColumnWidth < 12 Then wsDesv.Columns("F").ColumnWidth = 12
+    If wsDesv.Columns("G").ColumnWidth < 14 Then wsDesv.Columns("G").ColumnWidth = 14
 
     wsDesv.Activate
     wsDesv.Cells(1, 1).Select
 
-    MsgBox "Desvinculaciones actualizadas." & Chr(10) & Chr(10) & _
-           "  Chats:              " & totDesvC & Chr(10) & _
-           "  Llamadas:           " & totDesvL & Chr(10) & _
-           "  TOTAL:              " & (totDesvC + totDesvL) & Chr(10) & Chr(10) & _
-           "  Excluidos x filtro: " & excluidos & Chr(10) & Chr(10) & _
-           "  Ver detalle en hoja: '" & shDetalle & "'", _
+    MsgBox "Desvinculaciones actualizadas correctamente." & Chr(10) & Chr(10) & _
+           "  Meses procesados: " & nMesesD & Chr(10) & Chr(10) & _
+           "  Total desvinculados Chats:    " & totDesvC & Chr(10) & _
+           "  Total desvinculados Llamadas: " & totDesvL & Chr(10) & _
+           "  TOTAL GENERAL:               " & (totDesvC + totDesvL), _
            vbInformation, "Desvinculaciones por Mes 2026"
 
 CleanupDesv:
@@ -767,143 +669,12 @@ ErrHandlerDesv:
     Application.StatusBar = False
     Application.Calculation = xlCalculationAutomatic
     Application.ScreenUpdating = True
-    MsgBox "Error " & Err.Number & ": " & Err.Description, vbCritical, "Error desvinculaciones"
+    MsgBox "Error " & Err.Number & ": " & Err.Description, vbCritical, "Error en macro desvinculaciones"
 End Sub
 
 '===============================================================================
-'  HELPER: Encabezado de la hoja Detalle Desvinculados
+'  HELPER: escribir fila de datos de desvinculacion
 '===============================================================================
-Private Sub FormatDetalleHeader(ws As Worksheet)
-    ' Fila 1: Título
-    Merge_Cells_Safe ws, 1, 1, 1, 6
-    With ws.Cells(1, 1)
-        .Value = "DETALLE DE COLABORADORES DESVINCULADOS 2026"
-        .Font.Name = "Arial": .Font.Bold = True: .Font.Size = 13
-        .Font.Color = CLR_GOLD
-        .Interior.Color = CLR_DARK_BLUE
-        .HorizontalAlignment = xlLeft: .VerticalAlignment = xlCenter
-        .IndentLevel = 1
-    End With
-    ws.Rows(1).RowHeight = 32
-
-    ' Fila 2: Subtítulo
-    Merge_Cells_Safe ws, 2, 1, 2, 6
-    With ws.Cells(2, 1)
-        .Value = "Solo colaboradores filtrados (excluye Staff, Yape, IO, Trainee, Contactos Web, Supervisor, Atento, Empresa Proveedora, Asesor Principal, Asistente)"
-        .Font.Name = "Arial": .Font.Italic = True: .Font.Size = 8
-        .Font.Color = RGB(200, 200, 200)
-        .Interior.Color = CLR_DARK_BLUE
-        .HorizontalAlignment = xlLeft: .VerticalAlignment = xlCenter
-        .IndentLevel = 1
-    End With
-    ws.Rows(2).RowHeight = 16
-
-    ' Fila 3: espacio
-    ws.Rows(3).RowHeight = 6
-
-    ' Fila 4: encabezados de columna
-    Dim headers(1 To 6) As String
-    headers(1) = "Matricula"
-    headers(2) = "Colaborador"
-    headers(3) = "Segmento"
-    headers(4) = "Mes Salida"
-    headers(5) = "Mes Siguiente"
-    headers(6) = "Periodo"
-
-    Dim col As Long
-    For col = 1 To 6
-        With ws.Cells(4, col)
-            .Value = headers(col)
-            .Font.Name = "Arial": .Font.Bold = True: .Font.Size = 10
-            .Font.Color = CLR_GOLD
-            .Interior.Color = CLR_MID_BLUE
-            .HorizontalAlignment = xlCenter: .VerticalAlignment = xlCenter
-            .Borders(xlEdgeLeft).LineStyle = xlContinuous
-            .Borders(xlEdgeRight).LineStyle = xlContinuous
-            .Borders(xlEdgeTop).LineStyle = xlContinuous
-            .Borders(xlEdgeBottom).LineStyle = xlContinuous
-            .Borders(xlDiagonalDown).LineStyle = xlNone
-            .Borders(xlDiagonalUp).LineStyle = xlNone
-        End With
-    Next col
-    ws.Rows(4).RowHeight = 22
-End Sub
-
-'===============================================================================
-'  HELPER: Subencabezado de período en hoja Detalle
-'===============================================================================
-Private Sub WriteDetalleSubHeader(ws As Worksheet, rowNum As Long, label As String)
-    Merge_Cells_Safe ws, rowNum, 1, rowNum, 6
-    With ws.Cells(rowNum, 1)
-        .Value = "  >  " & label
-        .Font.Name = "Arial": .Font.Bold = True: .Font.Size = 11
-        .Font.Color = CLR_GOLD
-        .Interior.Color = CLR_DARK_BLUE
-        .HorizontalAlignment = xlLeft: .VerticalAlignment = xlCenter
-        .IndentLevel = 1
-    End With
-    ws.Rows(rowNum).RowHeight = 24
-End Sub
-
-'===============================================================================
-'  HELPER: Fila de colaborador desvinculado en hoja Detalle
-'===============================================================================
-Private Sub WriteDetalleRow(ws As Worksheet, rowNum As Long, _
-                             matricula As String, nombre As String, _
-                             segmento As String, mesA As String, mesB As String)
-    Dim isChats As Boolean
-    isChats = (segmento = "Chats")
-    Dim bg As Long
-    bg = IIf(isChats, CLR_LIGHT_ORANGE, CLR_LIGHT_GREEN)
-
-    Dim vals(1 To 6) As Variant
-    vals(1) = matricula
-    vals(2) = nombre
-    vals(3) = IIf(isChats, "Chats", "Llamadas")
-    vals(4) = mesA
-    vals(5) = mesB
-    vals(6) = mesA & " -> " & mesB
-
-    Dim col As Long
-    For col = 1 To 6
-        With ws.Cells(rowNum, col)
-            .Value = vals(col)
-            .Interior.Color = bg
-            .Font.Name = "Arial": .Font.Size = 10: .Font.Bold = False
-            .VerticalAlignment = xlCenter
-            .HorizontalAlignment = IIf(col = 2, xlLeft, xlCenter)
-            ' Bordes sin diagonales
-            Dim s As Long, sides(3) As Long
-            sides(0) = xlEdgeLeft: sides(1) = xlEdgeRight
-            sides(2) = xlEdgeTop:  sides(3) = xlEdgeBottom
-            For s = 0 To 3
-                With .Borders(sides(s))
-                    .LineStyle = xlContinuous
-                    .Color = RGB(170, 170, 170): .Weight = xlThin
-                End With
-            Next s
-            .Borders(xlDiagonalDown).LineStyle = xlNone
-            .Borders(xlDiagonalUp).LineStyle = xlNone
-        End With
-    Next col
-    ws.Rows(rowNum).RowHeight = 18
-End Sub
-
-'===============================================================================
-'  HELPER: Fila "sin desvinculados" en hoja Detalle
-'===============================================================================
-Private Sub WriteDetalleSinDatos(ws As Worksheet, rowNum As Long)
-    Merge_Cells_Safe ws, rowNum, 1, rowNum, 6
-    With ws.Cells(rowNum, 1)
-        .Value = "  — Sin desvinculados en este periodo (con los filtros aplicados)"
-        .Font.Italic = True: .Font.Color = RGB(150, 150, 150)
-        .Font.Size = 9: .Font.Name = "Arial"
-        .Interior.Color = CLR_YELLOW_NOTE
-        .HorizontalAlignment = xlLeft: .VerticalAlignment = xlCenter
-    End With
-    ws.Rows(rowNum).RowHeight = 16
-End Sub
-
 Private Sub WriteDesvRow(ws As Worksheet, rowNum As Long, _
                           periodo As String, mes As String, _
                           desvChats As Long, desvLlamadas As Long)
@@ -1027,4 +798,413 @@ Private Sub WriteDesvRowTotal(ws As Worksheet, rowNum As Long, _
     Next col
 
     ws.Rows(rowNum).RowHeight = 24
+End Sub
+
+'===============================================================================
+'  MACRO: ACTUALIZAR CONTABILIZADO AP Y SUPERVISORES
+'  Filtro previo: excluye Canal 2 que contenga "Yape" o "IO" (no case sensitive)
+'  Lógica de liderazgo: un AP/Supervisor lidera si su matrícula aparece en la
+'  columna "Mat. Jefe actual" de al menos un registro donde ese subordinado
+'  tiene "Asesor" en la columna "Tipo de Orgánico"
+'===============================================================================
+Public Sub ActualizarContabilizado()
+
+    Application.ScreenUpdating = False
+    Application.Calculation = xlCalculationManual
+    Application.StatusBar = "Procesando contabilizado AP/Supervisores..."
+
+    Dim wsData As Worksheet
+    Dim wsCont As Worksheet
+    Dim wsCfg  As Worksheet
+
+    On Error GoTo ErrHandlerCont
+
+    Set wsData = ThisWorkbook.Sheets(SH_DATA)
+    Set wsCfg  = ThisWorkbook.Sheets(SH_CONFIG)
+
+    '── Crear / referenciar hoja ─────────────────────────────────────────────
+    Dim shCont As String
+    shCont = "Contabilizado AP y Supervisores"
+    On Error Resume Next
+    Set wsCont = ThisWorkbook.Sheets(shCont)
+    On Error GoTo ErrHandlerCont
+    If wsCont Is Nothing Then
+        Set wsCont = ThisWorkbook.Sheets.Add(After:=ThisWorkbook.Sheets("RESUMEN"))
+        wsCont.Name = shCont
+    End If
+    wsCont.Cells.Clear
+
+    '── Leer orden de meses desde CONFIG (para agrupar por mes) ──────────────
+    Dim mesOrdenC(1 To 12) As String
+    Dim i As Long
+    For i = 1 To 12
+        mesOrdenC(i) = Trim(CStr(wsCfg.Cells(8 + i, 2).Value))
+    Next i
+
+    '── Leer DATA con filtro Canal 2 ─────────────────────────────────────────
+    '
+    '  Columnas relevantes:
+    '    Col  5  = Matricula
+    '    Col  7  = Colaborador (nombre)
+    '    Col 16  = Mat. Jefe actual  (a quién reporta)
+    '    Col 19  = Canal 2           (filtro exclusión)
+    '    Col 20  = Tipo              (AP / SUPERVISOR / etc.)
+    '    Col 21  = Tipo de Orgánico  (Asesor = subordinado válido)
+    '
+    '  Estructuras que construimos:
+    '    dictPersonas(mes|mat)  = "TIPO||NOMBRE"
+    '       → todos los AP y Supervisores válidos por mes
+    '    dictAsesoresJefe(mes|matJefe) = True
+    '       → jefes que tienen al menos un Asesor a cargo ese mes
+    '
+
+    Dim dictPersonas    As Object   ' key="mes|mat"        val="TIPO||Nombre"
+    Dim dictAsesoresJefe As Object  ' key="mes|matJefe"    val=True
+    Dim mesesCont       As Object   ' meses con datos
+    Set dictPersonas     = CreateObject("Scripting.Dictionary")
+    Set dictAsesoresJefe = CreateObject("Scripting.Dictionary")
+    Set mesesCont        = CreateObject("Scripting.Dictionary")
+
+    Dim lastRowC As Long
+    lastRowC = wsData.Cells(wsData.Rows.Count, COL_MATRICULA).End(xlUp).Row
+    Application.StatusBar = "Leyendo " & lastRowC & " registros..."
+
+    Dim excC As Long
+    excC = 0
+
+    Dim r As Long
+    For r = 2 To lastRowC
+        Dim anoC As String
+        anoC = Trim(CStr(wsData.Cells(r, COL_ANO).Value))
+        If anoC <> "2026" Then GoTo NextRowC
+
+        '── Filtro Canal 2: excluir Yape e IO ────────────────────────────────
+        Dim canal2C As String
+        canal2C = UCase(Trim(CStr(wsData.Cells(r, 19).Value)))
+        If InStr(canal2C, "YAPE") > 0 Then excC = excC + 1: GoTo NextRowC
+        If InStr(canal2C, " IO") > 0  Then excC = excC + 1: GoTo NextRowC
+        If Left(canal2C, 2) = "IO"    Then excC = excC + 1: GoTo NextRowC
+
+        '── Leer campos clave ────────────────────────────────────────────────
+        Dim mesC   As String, matC  As String
+        Dim tipoC  As String, nombreC As String
+        Dim tipoOrgC As String, matJefeC As String
+        mesC      = Trim(CStr(wsData.Cells(r, COL_MES).Value))
+        matC      = Trim(CStr(wsData.Cells(r, COL_MATRICULA).Value))
+        tipoC     = UCase(Trim(CStr(wsData.Cells(r, 20).Value)))
+        nombreC   = Trim(CStr(wsData.Cells(r, 7).Value))
+        tipoOrgC  = UCase(Trim(CStr(wsData.Cells(r, 21).Value)))
+        matJefeC  = Trim(CStr(wsData.Cells(r, 16).Value))
+
+        If mesC = "" Or matC = "" Then GoTo NextRowC
+
+        '── Registrar AP y Supervisores ──────────────────────────────────────
+        If InStr(tipoC, "AP") > 0 Or InStr(tipoC, "SUPERVISOR") > 0 Then
+            Dim keyPC As String
+            keyPC = mesC & "|" & matC
+            If Not dictPersonas.Exists(keyPC) Then
+                dictPersonas.Add keyPC, tipoC & "||" & nombreC
+            End If
+        End If
+
+        '── Registrar jefes con Asesores a cargo ─────────────────────────────
+        '   Si este registro tiene "Asesor" en Tipo de Orgánico
+        '   → su jefe (matJefeC) lidera al menos un asesor
+        If InStr(tipoOrgC, "ASESOR") > 0 Then
+            If matJefeC <> "" Then
+                Dim keyJC As String
+                keyJC = mesC & "|" & matJefeC
+                If Not dictAsesoresJefe.Exists(keyJC) Then
+                    dictAsesoresJefe.Add keyJC, True
+                End If
+            End If
+        End If
+
+        If Not mesesCont.Exists(mesC) Then mesesCont.Add mesC, True
+NextRowC:
+    Next r
+
+    '── Construir lista ordenada de meses con datos ───────────────────────────
+    Dim mesesOrdC() As String
+    Dim nMesesC As Long
+    nMesesC = 0
+    For i = 1 To 12
+        If mesOrdenC(i) <> "" Then
+            If mesesCont.Exists(mesOrdenC(i)) Then
+                ReDim Preserve mesesOrdC(nMesesC)
+                mesesOrdC(nMesesC) = mesOrdenC(i)
+                nMesesC = nMesesC + 1
+            End If
+        End If
+    Next i
+
+    '── Formatear encabezado de la hoja ──────────────────────────────────────
+    FormatContHeader wsCont, excC
+
+    '── Calcular y escribir por mes ──────────────────────────────────────────
+    Dim writeRowC As Long
+    writeRowC = 6   ' filas 1-5 = encabezado
+
+    ' Acumulados globales
+    Dim totAP As Long, totSup As Long
+    Dim totAPLider As Long, totSupLider As Long
+    totAP = 0: totSup = 0: totAPLider = 0: totSupLider = 0
+
+    Dim m As Long
+    For m = 0 To nMesesC - 1
+        Dim mesM As String
+        mesM = mesesOrdC(m)
+        Application.StatusBar = "Contabilizando: " & mesM
+
+        Dim cntAP As Long, cntSup As Long
+        Dim cntAPLid As Long, cntSupLid As Long
+        cntAP = 0: cntSup = 0: cntAPLid = 0: cntSupLid = 0
+
+        Dim kv As Variant
+        For Each kv In dictPersonas.Keys
+            Dim kpC() As String
+            kpC = Split(CStr(kv), "|")
+            If UBound(kpC) < 1 Then GoTo NextKvC
+            If kpC(0) <> mesM Then GoTo NextKvC
+
+            Dim matPersona As String
+            matPersona = kpC(1)
+
+            Dim valC() As String
+            valC = Split(CStr(dictPersonas(kv)), "||")
+            If UBound(valC) < 0 Then GoTo NextKvC
+
+            Dim tipoPersona As String
+            tipoPersona = valC(0)
+
+            ' ¿Lidera? → su mes|mat existe en dictAsesoresJefe
+            Dim esLider As Boolean
+            esLider = dictAsesoresJefe.Exists(mesM & "|" & matPersona)
+
+            If InStr(tipoPersona, "SUPERVISOR") > 0 Then
+                cntSup = cntSup + 1
+                If esLider Then cntSupLid = cntSupLid + 1
+            ElseIf InStr(tipoPersona, "AP") > 0 Then
+                cntAP = cntAP + 1
+                If esLider Then cntAPLid = cntAPLid + 1
+            End If
+NextKvC:
+        Next kv
+
+        ' Escribir bloque del mes
+        WriteContMesHeader wsCont, writeRowC, mesM
+        writeRowC = writeRowC + 1
+        WriteContDataRow wsCont, writeRowC, "AP", cntAP, False, False
+        writeRowC = writeRowC + 1
+        WriteContDataRow wsCont, writeRowC, "SUPERVISOR", cntSup, False, True
+        writeRowC = writeRowC + 1
+        WriteContDataRow wsCont, writeRowC, "AP que lideran un equipo", cntAPLid, True, False
+        writeRowC = writeRowC + 1
+        WriteContDataRow wsCont, writeRowC, "Supervisores que lideran un equipo", cntSupLid, True, True
+        writeRowC = writeRowC + 1
+        writeRowC = writeRowC + 1  ' espacio entre meses
+
+        ' Acumular
+        totAP = totAP + cntAP: totSup = totSup + cntSup
+        totAPLider = totAPLider + cntAPLid: totSupLider = totSupLider + cntSupLid
+    Next m
+
+    '── Bloque TOTAL ACUMULADO ────────────────────────────────────────────────
+    WriteContMesHeader wsCont, writeRowC, "TOTAL ACUMULADO 2026"
+    writeRowC = writeRowC + 1
+    WriteContDataRow wsCont, writeRowC, "AP", totAP, False, False
+    writeRowC = writeRowC + 1
+    WriteContDataRow wsCont, writeRowC, "SUPERVISOR", totSup, False, True
+    writeRowC = writeRowC + 1
+    WriteContDataRow wsCont, writeRowC, "AP que lideran un equipo", totAPLider, True, False
+    writeRowC = writeRowC + 1
+    WriteContDataRow wsCont, writeRowC, "Supervisores que lideran un equipo", totSupLider, True, True
+    writeRowC = writeRowC + 1
+
+    '── Timestamp ────────────────────────────────────────────────────────────
+    Dim tsRC As Long
+    tsRC = writeRowC + 1
+    Merge_Cells_Safe wsCont, tsRC, 1, tsRC, 4
+    With wsCont.Cells(tsRC, 1)
+        .Value = "Ultima actualizacion: " & Format(Now(), "dd/mm/yyyy hh:mm:ss") & _
+                 "  |  Meses procesados: " & nMesesC & _
+                 "  |  Registros excluidos (Yape/IO): " & excC
+        .Font.Italic = True: .Font.Size = 8
+        .Font.Color = RGB(150, 150, 150): .Font.Name = "Arial"
+    End With
+
+    '── Ajustar columnas ─────────────────────────────────────────────────────
+    wsCont.Columns("A:D").AutoFit
+    If wsCont.Columns("A").ColumnWidth < 38 Then wsCont.Columns("A").ColumnWidth = 38
+    If wsCont.Columns("B").ColumnWidth < 14 Then wsCont.Columns("B").ColumnWidth = 14
+    If wsCont.Columns("C").ColumnWidth < 14 Then wsCont.Columns("C").ColumnWidth = 14
+    If wsCont.Columns("D").ColumnWidth < 18 Then wsCont.Columns("D").ColumnWidth = 18
+
+    wsCont.Activate
+    wsCont.Cells(1, 1).Select
+
+    MsgBox "Contabilizado actualizado." & Chr(10) & Chr(10) & _
+           "  Meses procesados: " & nMesesC & Chr(10) & Chr(10) & _
+           "  AP total:                        " & totAP & Chr(10) & _
+           "  Supervisores total:               " & totSup & Chr(10) & _
+           "  AP que lideran equipo:            " & totAPLider & Chr(10) & _
+           "  Supervisores que lideran equipo:  " & totSupLider & Chr(10) & Chr(10) & _
+           "  Excluidos por Yape/IO:            " & excC, _
+           vbInformation, "Contabilizado AP y Supervisores"
+
+CleanupCont:
+    Application.StatusBar = False
+    Application.Calculation = xlCalculationAutomatic
+    Application.ScreenUpdating = True
+    Exit Sub
+
+ErrHandlerCont:
+    Application.StatusBar = False
+    Application.Calculation = xlCalculationAutomatic
+    Application.ScreenUpdating = True
+    MsgBox "Error " & Err.Number & ": " & Err.Description, vbCritical, "Error Contabilizado"
+End Sub
+
+'===============================================================================
+'  HELPER: Encabezado hoja Contabilizado
+'===============================================================================
+Private Sub FormatContHeader(ws As Worksheet, excluidos As Long)
+    ' Fila 1: Título
+    Merge_Cells_Safe ws, 1, 1, 1, 4
+    With ws.Cells(1, 1)
+        .Value = "CONTABILIZADO AP Y SUPERVISORES 2026"
+        .Font.Name = "Arial": .Font.Bold = True: .Font.Size = 13
+        .Font.Color = CLR_GOLD
+        .Interior.Color = CLR_DARK_BLUE
+        .HorizontalAlignment = xlLeft: .VerticalAlignment = xlCenter
+        .IndentLevel = 1
+    End With
+    ws.Rows(1).RowHeight = 32
+
+    ' Fila 2: Subtítulo
+    Merge_Cells_Safe ws, 2, 1, 2, 4
+    With ws.Cells(2, 1)
+        .Value = "Excluye Canal 2 que contenga 'Yape' o 'IO'  ·  Solo año 2026"
+        .Font.Name = "Arial": .Font.Italic = True: .Font.Size = 9
+        .Font.Color = RGB(200, 200, 200)
+        .Interior.Color = CLR_DARK_BLUE
+        .HorizontalAlignment = xlLeft: .VerticalAlignment = xlCenter
+        .IndentLevel = 1
+    End With
+    ws.Rows(2).RowHeight = 18
+
+    ' Fila 3: Nota de liderazgo
+    Merge_Cells_Safe ws, 3, 1, 3, 4
+    With ws.Cells(3, 1)
+        .Value = "Lidera equipo = su matricula aparece como Jefe de al menos un colaborador con 'Asesor' en Tipo de Organico"
+        .Font.Name = "Arial": .Font.Italic = True: .Font.Size = 8
+        .Font.Color = RGB(80, 80, 80)
+        .Interior.Color = CLR_YELLOW_NOTE
+        .HorizontalAlignment = xlLeft: .VerticalAlignment = xlCenter
+        .IndentLevel = 1
+    End With
+    ws.Rows(3).RowHeight = 16
+
+    ' Fila 4: espacio
+    ws.Rows(4).RowHeight = 6
+
+    ' Fila 5: encabezados de columna
+    Dim headers(1 To 4) As String
+    headers(1) = "Indicador"
+    headers(2) = "Cantidad"
+    headers(3) = "Mes"
+    headers(4) = "Detalle"
+
+    Dim col As Long
+    For col = 1 To 4
+        With ws.Cells(5, col)
+            .Value = headers(col)
+            .Font.Name = "Arial": .Font.Bold = True: .Font.Size = 10
+            .Font.Color = CLR_GOLD
+            .Interior.Color = CLR_MID_BLUE
+            .HorizontalAlignment = xlCenter: .VerticalAlignment = xlCenter
+            .Borders(xlEdgeLeft).LineStyle = xlContinuous
+            .Borders(xlEdgeRight).LineStyle = xlContinuous
+            .Borders(xlEdgeTop).LineStyle = xlContinuous
+            .Borders(xlEdgeBottom).LineStyle = xlContinuous
+            .Borders(xlDiagonalDown).LineStyle = xlNone
+            .Borders(xlDiagonalUp).LineStyle = xlNone
+        End With
+    Next col
+    ws.Rows(5).RowHeight = 22
+End Sub
+
+'===============================================================================
+'  HELPER: Subencabezado de mes
+'===============================================================================
+Private Sub WriteContMesHeader(ws As Worksheet, rowNum As Long, label As String)
+    Merge_Cells_Safe ws, rowNum, 1, rowNum, 4
+    With ws.Cells(rowNum, 1)
+        .Value = "  >  " & label
+        .Font.Name = "Arial": .Font.Bold = True: .Font.Size = 11
+        .Font.Color = CLR_GOLD
+        .Interior.Color = CLR_DARK_BLUE
+        .HorizontalAlignment = xlLeft: .VerticalAlignment = xlCenter
+        .IndentLevel = 1
+    End With
+    ws.Rows(rowNum).RowHeight = 24
+End Sub
+
+'===============================================================================
+'  HELPER: Fila de dato en contabilizado
+'  isLider:  True = fila de "lidera equipo" (color más intenso)
+'  isSup:    True = es Supervisor (verde), False = AP (naranja)
+'===============================================================================
+Private Sub WriteContDataRow(ws As Worksheet, rowNum As Long, _
+                              indicador As String, cantidad As Long, _
+                              isLider As Boolean, isSup As Boolean)
+    Dim bg As Long
+    If isLider Then
+        bg = IIf(isSup, CLR_MID_BLUE, CLR_DARK_BLUE)
+    Else
+        bg = IIf(isSup, CLR_LIGHT_GREEN, CLR_LIGHT_ORANGE)
+    End If
+
+    Dim fgColor As Long
+    fgColor = IIf(isLider, CLR_GOLD, RGB(50, 50, 50))
+
+    Dim detalle As String
+    If isLider Then
+        detalle = "Tiene al menos 1 Asesor a cargo"
+    Else
+        detalle = IIf(isSup, "Tipo contiene SUPERVISOR", "Tipo contiene AP")
+    End If
+
+    Dim vals(1 To 4) As Variant
+    vals(1) = indicador
+    vals(2) = cantidad
+    vals(3) = ""          ' mes se rellena desde el bloque de mes
+    vals(4) = detalle
+
+    Dim col As Long
+    For col = 1 To 4
+        With ws.Cells(rowNum, col)
+            .Value = vals(col)
+            .Interior.Color = bg
+            .Font.Name = "Arial": .Font.Size = 10: .Font.Bold = isLider
+            .Font.Color = fgColor
+            .VerticalAlignment = xlCenter
+            .HorizontalAlignment = IIf(col = 1 Or col = 4, xlLeft, xlCenter)
+
+            Dim s As Long, sides(3) As Long
+            sides(0) = xlEdgeLeft: sides(1) = xlEdgeRight
+            sides(2) = xlEdgeTop:  sides(3) = xlEdgeBottom
+            For s = 0 To 3
+                With .Borders(sides(s))
+                    .LineStyle = xlContinuous
+                    .Color = RGB(170, 170, 170): .Weight = xlThin
+                End With
+            Next s
+            .Borders(xlDiagonalDown).LineStyle = xlNone
+            .Borders(xlDiagonalUp).LineStyle = xlNone
+
+            If col = 2 Then .NumberFormat = "#,##0"
+        End With
+    Next col
+    ws.Rows(rowNum).RowHeight = 20
 End Sub
